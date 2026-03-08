@@ -1,16 +1,14 @@
-from flask import Flask, request, jsonify
+import runpod
 import re
 import smtplib
 import dns.resolver
 from ddgs import DDGS
 
-app = Flask(__name__)
-
 # --- 1. SCRAPER MOTORU ---
 class DDGScraper:
     def __init__(self):
         self.target_titles = ["CEO", "Owner", "Founder", "Co-Founder", "Marketing Director", "Manager"]
-        self.max_profiles = 5 # n8n zaman aşımına uğramasın diye ilk 5 yetkiliyi tarıyoruz
+        self.max_profiles = 5
 
     def create_search_query(self, company_name):
         titles = " OR ".join(f'"{t}"' for t in self.target_titles)
@@ -104,79 +102,67 @@ class EmailValidator:
 
     def verify_email(self, email, mx_record):
         try:
-            server = smtplib.SMTP(timeout=5) # n8n için hızlı timeout
+            server = smtplib.SMTP(timeout=5)
             server.connect(mx_record, 25)
             server.helo('mail.example.com')
-            server.mail('') # Null Sender taktiği
+            server.mail('')
             code, _ = server.rcpt(str(email))
             server.quit()
             return True if code == 250 else False
         except:
-            return False # Timeout (Port 25 kapalı) veya hata durumunda False dön
+            return False
 
-# --- 3. API ENDPOINT (n8n BURAYA İSTEK ATACAK) ---
-@app.route('/find_leads', methods=['POST'])
-def find_leads():
-    data = request.json
-    company_name = data.get("firma_adi")
-    domain = data.get("domain")
+# --- 3. RUNPOD SERVERLESS HANDLER (n8n BURAYA DÜŞECEK) ---
+def handler(job):
+    # n8n'den gelen dinamik veri 'job["input"]' içinden alınır
+    job_input = job['input']
+    company_name = job_input.get("firma_adi")
+    domain = job_input.get("domain")
 
     if not company_name or not domain:
-        return jsonify({"status": "error", "message": "Firma adı ve domain zorunludur."}), 400
+        return {"status": "error", "message": "Firma adı ve domain zorunludur."}
 
     print(f"\n[+] YENİ GÖREV ALINDI: {company_name} | {domain}")
 
-    # 1. Scraper'ı çalıştır
     scraper = DDGScraper()
     profiles = scraper.get_profiles(company_name)
 
     if not profiles:
-        print("[-] Yetkili bulunamadı.")
-        return jsonify({"status": "failed", "firma_adi": company_name, "reason": "LinkedIn'de yetkili bulunamadı."})
+        return {"status": "failed", "firma_adi": company_name, "reason": "LinkedIn'de yetkili bulunamadı."}
 
-    # 2. Validator'ı çalıştır
     validator = EmailValidator()
-    
-    # Domain'in posta sunucusunu bir kere bul (Her kişi için tekrar aramamıza gerek yok)
     mx_record = validator.get_mx_record(domain)
+    
     if not mx_record:
-        print("[-] Domain MX kaydı yok.")
-        return jsonify({"status": "failed", "firma_adi": company_name, "reason": "Firmanın aktif bir mail sunucusu yok."})
+        return {"status": "failed", "firma_adi": company_name, "reason": "Firmanın aktif bir mail sunucusu yok."}
 
     basarili_sonuclar = []
 
-    print(f"[*] {len(profiles)} kişi bulundu. E-mail doğrulaması başlıyor... (Port 25 lokalde kapalıysa Timeout alırız)")
-    
     for prof in profiles:
         emails_to_test = validator.generate_permutations(prof['first_name'], prof['last_name'], domain)
-        
         for email in emails_to_test:
             if validator.verify_email(email, mx_record):
-                # Doğru maili bulduk! Listeye ekle ve bu kişi için diğer ihtimalleri denemeyi bırak
                 basarili_sonuclar.append({
                     "Ad": prof['first_name'],
                     "Soyad": prof['last_name'],
                     "Unvan": prof['title'],
                     "Mail": email
                 })
-                print(f"  ✅ Bulundu: {email}")
                 break 
 
-    # 3. n8n'e Sonuç Döndür
     if basarili_sonuclar:
-        return jsonify({
+        return {
             "status": "success",
             "firma_adi": company_name,
             "domain": domain,
-            "data": basarili_sonuclar # Bulunan Müşteriler(Yetkili Mailler).csv formatına tam uygun!
-        })
+            "data": basarili_sonuclar
+        }
     else:
-        return jsonify({
+        return {
             "status": "failed",
             "firma_adi": company_name,
             "reason": "Yetkililer bulundu fakat hiçbir mail adresi doğrulanamadı."
-        })
+        }
 
-if __name__ == '__main__':
-    # Portu 5000 yerine 5001 yaptık
-    app.run(host='0.0.0.0', port=5001, debug=True)
+# RunPod motorunu başlat
+runpod.serverless.start({"handler": handler})
