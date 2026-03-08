@@ -1,0 +1,37 @@
+name: RunPod Icin Docker Imajini Hazirla
+
+on:
+  push:
+    branches: [ "main" ] # Sadece main dalına kod gönderdiğinde çalışır
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # GitHub'ın paket rafına yazma izni
+
+    steps:
+      - name: Kodları Çek
+        uses: actions/checkout@v4
+
+      - name: GitHub Container Registry'e Giriş Yap
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }} # Şifreye gerek yok, GitHub otomatik halleder
+
+      - name: Paket İsimlerini Belirle
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+
+      - name: Docker İmajını Kur ve Rafa Koy
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
